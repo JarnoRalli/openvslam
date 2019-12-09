@@ -1,161 +1,134 @@
-cmake_minimum_required(VERSION 3.1)
-project(openvslam LANGUAGES CXX C)
+#TODO: There are still cyclic dependencies in the modules.
+#These need to be fixed before shared libraries can be built.
+#TODO: The project has not been tested without FetchContent
 
-if(POLICY CMP0042)
-    cmake_policy(SET CMP0042 NEW)
-endif()
-if(POLICY CMP0074)
-    cmake_policy(SET CMP0074 OLD)
-endif()
+cmake_minimum_required(VERSION 3.12)
+project(OpenVSLAM VERSION 2.0 LANGUAGES CXX C)
 
-list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
-
-##################
-# Set build type #
-##################
-
-if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE "Release")
-    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+if( CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" )
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /FORCE:MULTIPLE")
 endif()
 
-message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+enable_testing()
 
-###########################
-# Set application options #
-###########################
+#---------
+# Options
+#---------
+#By default we use FetchContent to include most of the not so common
+#third party libraries in the project. By turning these configuration bits off, we can
+#use normal find_package mechanism.
+option(BUILD_SHARED_LIBS "DON'T ENABLE UNTIL CYCLIC DEPENDENCIES ARE SOLVED" OFF)
+option(USE_FETCH_GOOGLETEST "Fetch Google Test automatically" ON)
+option(USE_FETCH_JSON "Fetch JSON automatically" ON)
+option(USE_FETCH_SPDLOG "Fetch speed logger automatically" ON)
+option(USE_FETCH_YAML "Fetch YAML automatically" ON)
+option(USE_FETCH_SOCKET_IO "Fetch socket.io-client automatically" ON)
+option(USE_FETCH_GLOG "Fetch glog automatically" ON)
+option(USE_STACK_TRACE_LOGGER "Use a logger to trace the stack" OFF)
+set(USE_BOW_FRAMEWORK "DBoW2" CACHE STRING "DBoW2 or FBoW")
+set_property(CACHE USE_BOW_FRAMEWORK PROPERTY STRINGS "DBoW2" "FBoW")
+set(USE_VIEWER "Pangolin" CACHE STRING "Pangoling or Socket publisher")
+set_property(CACHE USE_VIEWER PROPERTY STRINGS "Pangolin" "Socket")
 
-set(USE_CCACHE ON CACHE BOOL "Use ccache to accelerate a build")
+#Build in parallel in Visual Studio
+add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/MP>)
 
-find_program(CCACHE_EXE ccache)
-if(USE_CCACHE AND CCACHE_EXE)
-    message(STATUS "ccache: Enabled")
-    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_EXE}")
-    set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK "${CCACHE_EXE}")
+#Choose the BoW framework
+if(USE_BOW_FRAMEWORK MATCHES "DBoW2")
+    find_package(DBoW2 REQUIRED)
+    set(BOW_INCLUDE_DIRS ${DBoW2_INCLUDE_DIRS} CACHE STRING "")
+    set(BOW_LIBS ${DBoW2_LIBS} CACHE STRING "")
+    add_definitions(-DUSE_DBOW2)
+elseif(BOW_FRAMEWORK MATCHES "FBoW")
+    find_package(fbow REQUIRED)
+    set(BOW_INCLUDE_DIRS ${fbow_INCLUDE_DIRS} CACHE STRING "")
+    set(BOW_LIBS ${fbow_LIBS} CACHE STRING "")
+    remove_definitions(-DUSE_DBOW2)
 else()
-    message(STATUS "ccache: Disabled")
-    set(USE_CCACHE OFF)
+    message(FATAL_ERROR "Invalid BoW framework: ${USE_BOW_FRAMEWORK}")
+endif()
+message(STATUS "BOW include dirs: ${BOW_INCLUDE_DIRS}")
+message(STATUS "BOW libs: ${BOW_LIBS}")
+
+#Test that we can find rest of the required packages before going any further
+find_package(OpenCV REQUIRED)
+find_package(g2o REQUIRED)
+find_package(Eigen3 REQUIRED)
+if( USE_VIEWER STREQUAL "Pangolin" )
+    find_package(Pangolin REQUIRED)
 endif()
 
-set(USE_SANITIZER OFF CACHE BOOL "Enable Address/Memory sanitizer (set env as ASAN_OPTIONS=detect_leaks=1)")
-
-if(USE_SANITIZER)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-omit-frame-pointer -fsanitize=address")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-omit-frame-pointer -fsanitize=address")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fno-omit-frame-pointer -fsanitize=address")
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fno-omit-frame-pointer -fsanitize=address")
-    message(STATUS "Address/Memory sanitizer: ENABLED")
-else()
-    message(STATUS "Address/Memory sanitizer: DISABLED")
+#Test that we find the required packages, depending on whether these
+#are to be fetched by FetchContent
+if( NOT USE_FETCH_GOOGLETEST )
+    find_package(gtest REQUIRED)
 endif()
 
-set(USE_STACK_TRACE_LOGGER OFF CACHE BOOL "Enable automatic stack trace logger of google-glog")
-
-if(USE_STACK_TRACE_LOGGER)
-    message(STATUS "Stack trace logger: ENABLED")
-    # Glog
-    find_package(Glog REQUIRED)
-    include_directories(${GLOG_INCLUDE_DIR})
-else()
-    message(STATUS "Stack trace logger: DISABLED")
+if( NOT USE_FETCH_JSON )
+    find_package(nlohmann-json REQUIRED)
 endif()
 
-set(USE_GOOGLE_PERFTOOLS OFF CACHE BOOL "Enable profiler of google-perftools")
-
-if(USE_GOOGLE_PERFTOOLS)
-    message(STATUS "Google Perftools: ENABLED")
-    # Gperftools
-    find_package(Gperftools REQUIRED)
-    include_directories(${GPERFTOOLS_INCLUDE_DIRS})
-else()
-    message(STATUS "Google Perftools: DISABLED")
+if( NOT USE_FETCH_SPDLOG )
+    find_package(spdlog REQUIRED)
 endif()
 
-########################
-# Set compiler options #
-########################
-
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
-
-set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -Og")
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -Og")
-
-set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -ffast-math")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -ffast-math")
-
-set(BUILD_WITH_MARCH_NATIVE OFF CACHE BOOL "Enable architecture-aware optimization (-march=native)")
-
-if(BUILD_WITH_MARCH_NATIVE)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mtune=native -march=native")
-    set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -mtune=native -march=native")
-    message(STATUS "Architecture-aware optimization (-march=native): ENABLED")
-else()
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mtune=native")
-    set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -mtune=native")
-    message(STATUS "Architecture-aware optimization (-march=native): DISABLED")
+if( NOT USE_FETCH_YAML )
+    find_package(yaml-cpp REQUIRED)
 endif()
 
-set(USE_SSE_ORB OFF CACHE BOOL "Enable SSE3 instruction for ORB extraction (-msse3)")
+if( NOT USE_FETCH_SOCKET_IO )
+    find_package(socket.io-client REQUIRED)
+endif()
 
+if( NOT USE_FETCH_GLOG )
+    find_package(glog REQUIRED)
+endif()
+
+#---------------
+# Other options
+#---------------
+#Enable SSE3 for ORB extraction
+option(USE_SSE_ORB "Enable SSE3 instruction for ORB extraction" OFF)
 if(USE_SSE_ORB)
-    message(STATUS "SSE3 for ORB extraction (-msse3): ENABLED")
-    add_definitions(-DUSE_SSE_ORB)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msse3")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse3")
+    include(CheckCXXCompilerFlag)
+    CHECK_CXX_COMPILER_FLAG("-march=native" COMPILER_OPT_ARCH_NATIVE_SUPPORTED)
+    if(COMPILER_OPT_ARCH_NATIVE_SUPPORTED)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+        set(CMAKE_C_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+        add_definitions(-DUSE_SSE_ORB)
+        message(STATUS "SSE: enabled")
+    else()
+        CHECK_CXX_COMPILER_FLAG("/arch:AVX" COMPILER_OPT_ARCH_AVX_SUPPORTED)
+        if(COMPILER_OPT_ARCH_AVX_SUPPORTED)
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /arch:AVX")
+            set(CMAKE_C_FLAGS "${CMAKE_CXX_FLAGS} /arch:AVX")
+            add_definitions(-DUSE_SSE_ORB)
+            message(STATUS "SSE: enabled")
+        endif()
+    endif()
 else()
-    message(STATUS "SSE3 for ORB extraction (-msse3): DISABLED")
     remove_definitions(-DUSE_SSE_ORB)
+    #Fails in Linux if the flags are empty
+    if(NOT ${CMAKE_CXX_FLAGS} STREQUAL "")
+        string(REPLACE "/arch:AVX" "" CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS})
+    endif()
+    if(NOT ${CMAKE_C_FLAGS} STREQUAL "")
+        string(REPLACE "/arch:AVX" "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
+    endif()
+    if(NOT ${CMAKE_CXX_FLAGS} STREQUAL "")
+        string(REPLACE "-march=native" "" CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS})
+    endif()
+    if(NOT ${CMAKE_C_FLAGS} STREQUAL "")
+        string(REPLACE "-march=native" "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
+    endif()
+    message(STATUS "SSE: disabled")
 endif()
 
-set(USE_SSE_FP_MATH OFF CACHE BOOL "Enable SSE instruction for floating-point operation (-mfpmath=sse)")
-
-if(USE_SSE_FP_MATH)
-    message(STATUS "SSE for floating-point operation (-mfpmath=sse): ENABLED")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mfpmath=sse")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mfpmath=sse")
-else()
-    message(STATUS "SSE for floating-point operation (-mfpmath=sse): DISABLED")
-endif()
-
-#######################
-# Check C++11 support #
-#######################
-
-include(CheckCXXCompilerFlag)
-check_cxx_compiler_flag("-std=c++17" COMPILER_SUPPORTS_CXX17)
-check_cxx_compiler_flag("-std=c++14" COMPILER_SUPPORTS_CXX14)
-check_cxx_compiler_flag("-std=c++11" COMPILER_SUPPORTS_CXX11)
-check_cxx_compiler_flag("-std=c++0x" COMPILER_SUPPORTS_CXX0X)
-if(COMPILER_SUPPORTS_CXX17)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
-    message(STATUS "C++11 support: OK (-std=c++17)")
-elseif(COMPILER_SUPPORTS_CXX14)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14")
-    message(STATUS "C++11 support: OK (-std=c++14)")
-elseif(COMPILER_SUPPORTS_CXX11)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
-    message(STATUS "C++11 support: OK (-std=c++11)")
-elseif(COMPILER_SUPPORTS_CXX0X)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x")
-    message(STATUS "C++11 support: OK (-std=c++0x)")
-else()
-    message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support. Please use a different C++ compiler.")
-endif()
-
-#################
-# Find packages #
-#################
-
-include_directories(${PROJECT_SOURCE_DIR}/src)
-
-# thread library
-find_package(Threads REQUIRED)
-
-# OpenMP
-set(USE_OPENMP ON CACHE BOOL "Use OpenMP")
+#Enable OpenMP
+option(USE_OPENMP "Enable OpenMP support" OFF)
+find_package(OpenMP)
 if(USE_OPENMP)
-    find_package(OpenMP)
     if(OpenMP_FOUND)
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
@@ -167,134 +140,68 @@ if(USE_OPENMP)
     endif()
 else()
     remove_definitions(-DUSE_OPENMP)
+    #Fails in Linux if the flags are empty
+    if(NOT ${CMAKE_CXX_FLAGS} STREQUAL "")
+        string(REPLACE ${OpenMP_CXX_FLAGS} "" CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS})
+    endif()
+    if(NOT ${CMAKE_C_FLAGS} STREQUAL "")
+        string(REPLACE ${OpenMP_C_FLAGS} "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
+    endif()
     message(STATUS "OpenMP: DISABLED")
 endif()
 
-# OpenCV
-find_package(OpenCV 3.3.1 QUIET)
-if(NOT OpenCV_FOUND)
-    find_package(OpenCV 4.0)
-    if(NOT OpenCV_FOUND)
-        message(FATAL_ERROR "OpenCV >= 3.3.1 not found")
-    endif()
-endif()
-message(STATUS "Use OpenCV ${OpenCV_VERSION}")
-include_directories(${OpenCV_INCLUDE_DIRS})
+#-----------
+# Exporting
+#-----------
+set(OPENVSLAM_TARGETS_EXPORT_NAME "${PROJECT_NAME}Targets" CACHE STRING "Name of the export target")
+set(OPENVSLAM_NAMESPACE "${PROJECT_NAME}::" CACHE STRING "Name of the export target namespace")
 
-# Eigen
-find_package(Eigen3 3.2 REQUIRED)
-include_directories(${EIGEN3_INCLUDE_DIR})
+#---------------------------------------
+# Add the corresponding sub-directories
+#---------------------------------------
+add_subdirectory(3rdparty)
+add_subdirectory(modules)
+add_subdirectory(test)
+add_subdirectory(examples)
 
-# g2o
-find_package(G2O REQUIRED)
-include_directories(${G2O_INCLUDE_DIR})
+#---------------------------
+# Installation instructions
+#---------------------------
+include(GNUInstallDirs)
+set(INSTALL_CONFIGDIR ${CMAKE_INSTALL_LIBDIR}/cmake/OpenVSLAM)
 
-# CXSparse for g2o
-find_package(CXSparse)
-if(CXSPARSE_FOUND)
-    include_directories(${CXSPARSE_INCLUDE_DIRS})
-endif()
+#Export the targets to a script
+install(EXPORT ${OPENVSLAM_TARGETS_EXPORT_NAME}
+  FILE
+    ${OPENVSLAM_TARGETS_EXPORT_NAME}.cmake
+  NAMESPACE
+    ${OPENVSLAM_NAMESPACE}
+  DESTINATION
+    ${INSTALL_CONFIGDIR}
+)
 
-# SuiteSparse for g2o
-find_package(SuiteSparse)
-if(SUITESPARSE_FOUND)
-    include_directories(${SUITESPARSE_INCLUDE_DIRS})
-endif()
+#Create a ConfigVersion.cmake file
+include(CMakePackageConfigHelpers)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/OpenVSLAMConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY AnyNewerVersion
+)
 
-# yaml-cpp
-find_package(YamlCpp REQUIRED)
-include_directories(${YAMLCPP_INCLUDE_DIRS})
+#Create a configuration file
+configure_package_config_file(
+    ${CMAKE_SOURCE_DIR}/cmake/OpenVSLAMConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/OpenVSLAMConfig.cmake
+    INSTALL_DESTINATION ${INSTALL_CONFIGDIR}
+    PATH_VARS CMAKE_INSTALL_INCLUDEDIR CMAKE_INSTALL_LIBDIR
+)
 
-# spdlog
-set(spdlog_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/3rd/spdlog/include)
-include_directories(${spdlog_INCLUDE_DIR})
+#Install the version- and configuration files
+install(FILES
+        ${CMAKE_CURRENT_BINARY_DIR}/OpenVSLAMConfig.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/OpenVSLAMConfigVersion.cmake
+        DESTINATION ${INSTALL_CONFIGDIR}
+)
 
-# popl
-set(popl_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/3rd/popl/include)
-include_directories(${popl_INCLUDE_DIR})
+#export(PACKAGE OpenVSLAM)
 
-# json
-set(json_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/3rd/json/include)
-include_directories(${json_INCLUDE_DIR})
-
-# pangolin viewer
-set(USE_PANGOLIN_VIEWER ON CACHE BOOL "Enable Pangolin Viewer")
-if(USE_PANGOLIN_VIEWER)
-    find_package(Pangolin REQUIRED)
-endif()
-
-# socket publisher
-set(USE_SOCKET_PUBLISHER OFF CACHE BOOL "Enable Socket Publisher")
-if(USE_SOCKET_PUBLISHER)
-    find_package(sioclient REQUIRED)
-    find_package(Protobuf REQUIRED)
-    if(NOT PROTOBUF_PROTOC_EXECUTABLE)
-        message(FATAL_ERROR "Could not find protoc executable (PROTOBUF_PROTOC_EXECUTABLE)")
-    endif()
-    message(STATUS "Found protoc executable: ${PROTOBUF_PROTOC_EXECUTABLE}")
-endif()
-
-#################
-# BoW framework #
-#################
-
-set(BOW_FRAMEWORK "DBoW2" CACHE STRING "DBoW2 or FBoW")
-set_property(CACHE BOW_FRAMEWORK PROPERTY STRINGS "DBoW2" "FBoW")
-
-if(BOW_FRAMEWORK MATCHES "DBoW2")
-    find_package(DBoW2 REQUIRED)
-    set(BOW_INCLUDE_DIRS ${DBoW2_INCLUDE_DIRS})
-    set(BOW_LIBS ${DBoW2_LIBS})
-    add_definitions(-DUSE_DBOW2)
-elseif(BOW_FRAMEWORK MATCHES "FBoW")
-    find_package(fbow REQUIRED)
-    set(BOW_INCLUDE_DIRS ${fbow_INCLUDE_DIRS})
-    set(BOW_LIBS ${fbow_LIBS})
-else()
-    message(FATAL_ERROR "Invalid BoW framework: ${BOW_FRAMEWORK}")
-endif()
-include_directories(${BOW_INCLUDE_DIRS})
-message(STATUS "BoW framework: ${BOW_FRAMEWORK} (found in ${BOW_INCLUDE_DIRS})")
-
-##############################
-# Select g2o library modules #
-##############################
-
-set(USE_G2O_DEBUG OFF CACHE BOOL "Use the debug build of g2o")
-
-if(USE_G2O_DEBUG)
-    set(G2O_LIBS
-            ${G2O_CORE_LIBRARY_DEBUG}
-            ${G2O_STUFF_LIBRARY_DEBUG}
-            ${G2O_SOLVER_DENSE_DEBUG}
-            ${G2O_SOLVER_EIGEN_DEBUG}
-            ${G2O_SOLVER_CHOLMOD_DEBUG}
-            ${G2O_SOLVER_CSPARSE_DEBUG}
-            ${G2O_SOLVER_CSPARSE_EXTENSION_DEBUG}
-            ${G2O_TYPES_SBA_DEBUG}
-            ${G2O_TYPES_SIM3_DEBUG})
-else()
-    set(G2O_LIBS
-            ${G2O_CORE_LIBRARY}
-            ${G2O_STUFF_LIBRARY}
-            ${G2O_SOLVER_DENSE}
-            ${G2O_SOLVER_EIGEN}
-            ${G2O_SOLVER_CHOLMOD}
-            ${G2O_SOLVER_CSPARSE}
-            ${G2O_SOLVER_CSPARSE_EXTENSION}
-            ${G2O_TYPES_SBA}
-            ${G2O_TYPES_SIM3})
-endif()
-
-###################
-# Build Selection #
-###################
-
-add_subdirectory(src)
-add_subdirectory(example)
-
-set(BUILD_TESTS OFF CACHE BOOL "Build tests")
-if(BUILD_TESTS)
-    enable_testing()
-    add_subdirectory(test)
-endif()

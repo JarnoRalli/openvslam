@@ -38,3 +38,7 @@ cmake-build-release/
 *.exe
 *.out
 *.app
+
+# KDevelop
+*.kdev4
+*.kdev
